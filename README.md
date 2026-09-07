@@ -7,6 +7,7 @@ RUG schedule viewer, with more advanced and convenient functionality
 1. Add your courses/programmes and select your tutorial group on the right.
 2. Click **Generate schedule**.
 3. You may save your current filters via the **Save** button.
+4. and load them later from the top of the page
 
 ---
 
