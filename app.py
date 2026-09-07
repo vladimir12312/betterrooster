@@ -24,6 +24,13 @@ BASE_URL = "https://rooster.rug.nl"
 ACADEMIC_YEAR = "2026-2027"
 PORT = int(os.environ.get("PORT", "8000"))
 
+# Activity types that are taught in small student groups. Only these are filtered
+# by the selected group; lectures/exams are always shown for the whole class.
+GROUPED_TYPES = {
+    "Tutorial", "Practical", "Computer practical",
+    "Workgroup", "Werkgroep", "Practicum",
+}
+
 # ---------------------------------------------------------------------------
 # RUG API client
 # ---------------------------------------------------------------------------
@@ -82,6 +89,14 @@ def generate_schedule(object_ids, course_codes):
         s, e = r["start"], r["end"]
         atype = (r.get("activityType") or {}).get("displayNameEn") or ""
         desc = r.get("description") or ""
+        rooms = [
+            {
+                "code": x.get("code") or "",
+                "name": x.get("displayNameEn") or x.get("displayNameNl", ""),
+                "map": x.get("urlMap") or "",
+            }
+            for x in r.get("rooms", []) or []
+        ]
         activities.append({
             "id": r["id"],
             "start": {"y": s[0], "m": s[1], "d": s[2], "H": s[3], "M": s[4]},
@@ -90,10 +105,12 @@ def generate_schedule(object_ids, course_codes):
             "comment": r.get("comment") or "",
             "courses": ", ".join(c.get("displayNameEn", "") for c in r.get("courseOfferings", [])),
             "programmes": ", ".join(p.get("displayNameEn", "") for p in r.get("programmeOfferings", [])),
+            "programmeIds": [p.get("id") for p in r.get("programmeOfferings", []) if p.get("id")],
             "groups": [
                 {"id": x["id"], "name": x.get("displayNameEn") or x.get("displayNameNl", "")}
                 for x in r.get("studentGroups", [])
             ],
+            "rooms": rooms,
         })
     activities.sort(key=lambda a: (a["start"]["y"], a["start"]["m"], a["start"]["d"],
                                    a["start"]["H"], a["start"]["M"]))
@@ -105,6 +122,24 @@ def course_groups(course_codes):
     acts = generate_schedule([], list(course_codes))
     seen = {}
     for a in acts:
+        for g in a.get("groups", []):
+            seen.setdefault(g["id"], g["name"])
+    out = [{"id": i, "name": n} for i, n in seen.items()]
+    out.sort(key=lambda x: x["name"].lower())
+    return out
+
+
+def programme_groups(programme_ids):
+    """Small-group (tutorial/practical) groups across all courses in a programme.
+
+    Only groups from GROUPED_TYPES activities are offered, so the group the user
+    picks for a programme reliably filters tutorials across every course in it.
+    """
+    acts = generate_schedule(list(programme_ids), [])
+    seen = {}
+    for a in acts:
+        if a.get("type") not in GROUPED_TYPES:
+            continue
         for g in a.get("groups", []):
             seen.setdefault(g["id"], g["name"])
     out = [{"id": i, "name": n} for i, n in seen.items()]
@@ -176,8 +211,12 @@ th{background:#f0f0f0}
 .week .slot b{font-size:12px}
 .week .slot .grp{font-size:10px;color:#a05;display:block}
 .week .slot .cm{font-size:11px;color:#555;white-space:nowrap}
+.week .slot .loc{font-size:11px;color:#063;font-weight:600;white-space:nowrap;display:inline-block;background:#e8f5ec;border-radius:3px;padding:0 4px;margin:2px 0;text-decoration:none}
 .future{outline:2px solid var(--red);outline-offset:-2px}
 .past{opacity:.4}
+.foot{margin:8px auto 24px;max-width:1200px;padding:0 20px;font-size:10.5px;color:#999}
+.foot a{color:#999;text-decoration:underline}
+.foot p{margin:4px 0 0;font-size:9.5px}
 #status{font-size:12px}
 .weeknav{display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap}
 </style>
@@ -231,15 +270,21 @@ th{background:#f0f0f0}
   </div>
 
 </main>
+<footer class="foot">
+  <a href="https://rooster.rug.nl/current" target="_blank" rel="noopener">RUG original timetable</a> &middot;
+  <a href="https://github.com/vladimir12312/betterrooster" target="_blank" rel="noopener">Source on GitHub</a>
+  <p>Software is provided as-is and uses the RUG rooster.rug.nl website API endpoints.</p>
+</footer>
 <script>
 const $=(s,r=document)=>r.querySelector(s);
 function post(url,body){return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(async r=>{if(!r.ok)throw new Error((await r.json()).error||("HTTP "+r.status));return r.json()})}
 const API={
   search:async(kind,term)=>(await post("/api/search",{kind,term})).items,
   courseGroups:codes=>post("/api/course-groups",{courseCodes:codes}),
+  programmeGroups:ids=>post("/api/programme-groups",{programmeIds:ids}),
   generate:sel=>post("/api/generate",sel),
 };
-const STORE_KEY="rug_filters_v2";
+const STORE_KEY="rug_filters_v3";
 const state={pairs:[],programmes:[],activities:[],scheduleWeek:null,currentFilterId:null};
 const DAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 const SLOTS=[];for(let h=9;h<=21;h+=2)SLOTS.push(h);
@@ -321,10 +366,11 @@ function applyFilter(id){
   const f=loadFilters().find(x=>x.id===id);if(!f)return;
   state.currentFilterId=f.id;
   state.pairs=(f.courses||[]).map(c=>({c:{code:c.code,name:c.name,term:c.term||""},g:c.group?{id:c.group.id,name:c.group.name}:null,_groups:[]}));
-  state.programmes=(f.programmes||[]).map(p=>({id:p.id,name:p.name}));
+  state.programmes=(f.programmes||[]).map(p=>({id:p.id,name:p.name,g:p.group?{id:p.group.id,name:p.group.name}:null,_groups:[]}));
   state.activities=[];state.scheduleWeek=null;
   $("#filterName").value=f.name;
   loadAllCourseGroups();
+  loadAllProgrammeGroups();
   renderPairs();renderProgs();renderFilters();
   $("#schedule").innerHTML='<span class="noweek">Loaded filter. Press &quot;Generate schedule&quot;.</span>';
 }
@@ -339,7 +385,7 @@ function deleteFilter(id){
 function currentFilter(){
   return {
     courses:state.pairs.map(p=>p.c?({code:p.c.code,name:p.c.name,term:p.c.term,group:p.g?{id:p.g.id,name:p.g.name}:null}):null).filter(Boolean),
-    programmes:state.programmes.map(p=>({id:p.id,name:p.name})),
+    programmes:state.programmes.map(p=>({id:p.id,name:p.name,group:p.g?{id:p.g.id,name:p.g.name}:null})),
   };
 }
 
@@ -372,6 +418,16 @@ function loadCourseGroups(i){
 }
 function loadAllCourseGroups(){
   return Promise.all(state.pairs.map((_,i)=>loadCourseGroups(i)));
+}
+
+function loadProgGroups(i){
+  const p=state.programmes[i];
+  p._groups=[];
+  if(!p.id)return Promise.resolve();
+  return API.programmeGroups([p.id]).then(r=>{p._groups=r.groups||[]}).catch(()=>{p._groups=[]});
+}
+function loadAllProgrammeGroups(){
+  return Promise.all(state.programmes.map((_,i)=>loadProgGroups(i)));
 }
 
 function buildPairRow(i){
@@ -456,10 +512,48 @@ function buildProgRow(i){
         <div class="tt-drop"></div></div>
       <div class="picked" style="display:block"><b>${esc(p.name)}</b></div>
     </div>
+    <div class="col">
+      <label>Tutorial group ${p.g?`<button class="link" data-clear="${i}">clear</button>`:""}</label>
+      <div class="tt"><input type="text" class="tt-input" placeholder="${p.id?"type or pick your group for all courses...":"pick a programme first"}" ${p.id?"":"disabled"} value="${p.g?esc(p.g.name):""}">
+        <div class="tt-drop"></div></div>
+      <div class="picked"></div>
+    </div>
     <button class="delpair" data-del="${i}" title="Remove">&times;</button>`;
   const inp=wrap.querySelector(".tt-input"),drop=wrap.querySelector(".tt-drop");
+  const gInp=wrap.querySelectorAll(".tt-input")[1],gDrop=wrap.querySelectorAll(".tt-drop")[1];
+
   typeahead(inp,drop,async term=>(await API.search("programme",term))
-    .map(o=>({name:o.name,meta:o.info||o.code,pick:()=>{p.id=o.id;p.name=o.name;rebuildProg(i)}})),()=>{});
+    .map(o=>({name:o.name,meta:o.info||o.code,pick:()=>{
+      if(p.id===o.id)return;
+      const id=o.id;
+      p.id=o.id;p.name=o.name;p.g=null;
+      rebuildProg(i);
+      loadProgGroups(i).then(()=>{
+        if(p.id!==id)return;
+        const row=$("#progs").children[i];
+        const gi=row?row.querySelectorAll(".tt-input")[1]:null;
+        if(gi){gi.disabled=false;gi.placeholder="type or pick your group for all courses...";gi.focus()}
+      });
+    }})),()=>{});
+
+  typeahead(gInp,gDrop,async term=>{
+    const t=term.toLowerCase();
+    const progGroupOpts=(p._groups||[]).filter(g=>!t||g.name.toLowerCase().includes(t))
+      .map(g=>({name:g.name,tag:"this programme",pick:()=>{p.g={id:g.id,name:g.name};rebuildProg(i)}}));
+    if(!state.programmes[i]||!p.id)return progGroupOpts;
+    const extra=(await API.search("group",term))
+      .filter(o=>!(p._groups||[]).some(g=>g.id===o.id))
+      .map(o=>({name:o.name,meta:o.info||o.code,pick:()=>{p.g={id:o.id,name:o.name};rebuildProg(i)}}));
+    return progGroupOpts.concat(extra);
+  },()=>{});
+
+  if(p.id&&p.g){
+    const chip=wrap.querySelectorAll(".picked")[1];
+    chip.style.display="block";
+    chip.innerHTML=`Programme: <b>${esc(p.name)}</b> &rarr; tutorial group: <b>${esc(p.g.name)}</b>`;
+  }
+  const clearBtn=wrap.querySelector("[data-clear]");
+  if(clearBtn)clearBtn.onclick=e=>{e.stopPropagation();p.g=null;rebuildProg(i)};
   wrap.querySelector("[data-del]").onclick=()=>{state.programmes.splice(i,1);renderProgs()};
   return wrap;
 }
@@ -470,24 +564,26 @@ function renderProgs(){
 function rebuildProg(i){renderProgs()}
 
 function addCourse(){state.pairs.push(newPair());renderPairs()}
-function addProg(){state.programmes.push({id:null,name:""});renderProgs()}
+function addProg(){state.programmes.push({id:null,name:"",g:null,_groups:[]});renderProgs()}
 function clearAll(){state.pairs=[];state.programmes=[];state.activities=[];state.scheduleWeek=null;renderPairs();renderProgs();$("#schedule").innerHTML='<span class="noweek">Pick courses and groups, then generate.</span>'}
 
-// ---------------- course-group rule ----------------
+// ---------------- group rule ----------------
 // Only small-group session types are filtered by the selected group.
-// Lectures, exams and any other activity type are ALWAYS included, even when
-// the API attaches a cohort-wide student group to them (which would otherwise
-// hide a lecture the user should attend).
+// A course's group filters that course's tutorials; a programme's group filters
+// the tutorials of every course in that programme. Lectures, exams and any other
+// activity type are ALWAYS included, even when the API attaches a cohort-wide
+// student group to them (which would otherwise hide a lecture you attend).
 const GROUPED_TYPES=new Set(["Tutorial","Practical","Computer practical","Workgroup","Werkgroep","Practicum"]);
 function groupFiltered(activities){
-  const groupIds=state.pairs.filter(p=>p.g&&p.g.id).map(p=>p.g.id);
-  if(!groupIds.length)return activities;
+  const courseGroupIds=state.pairs.filter(p=>p.g&&p.g.id).map(p=>p.g.id);
+  const progs=state.programmes.filter(p=>p.id&&p.g&&p.g.id);
   return activities.filter(a=>{
-    if(GROUPED_TYPES.has(a.type)){
-      if(!a.groups.length)return true;
-      return a.groups.some(g=>groupIds.includes(g.id));
-    }
-    return true;
+    if(!GROUPED_TYPES.has(a.type))return true;
+    if(!a.groups.length)return true;
+    if(a.groups.some(g=>courseGroupIds.includes(g.id)))return true;
+    const prog=progs.find(p=>a.programmeIds&&a.programmeIds.includes(p.id));
+    if(prog&&a.groups.some(g=>g.id===prog.g.id))return true;
+    return false;
   });
 }
 
@@ -530,14 +626,15 @@ function renderSchedule(){
       let cells="";
       for(const a of arr){
         const gname=a.groups.map(g=>g.name).join(", ");
-        cells+=`<div class="slot"><b>${esc(a.type||"(activity)")}</b><span class="cm">${pad(a.start.H)}:${pad(a.start.M)}-${pad(a.end.H)}:${pad(a.end.M)}</span>${gname?`<span class="grp">${esc(gname)}</span>`:""}${a.courses?`<div class="cm">${esc(a.courses)}</div>`:""}${a.comment?`<div class="cm">${esc(a.comment)}</div>`:""}</div>`;
+        const loc=(a.rooms||[]).map(r=>r.map?`<a class="loc" href="${esc(r.map)}" target="_blank" rel="noopener">${esc(r.code||r.name||"room")}</a>`:`<span class="loc">${esc(r.code||r.name||"room")}</span>`).join(" &middot; ");
+        cells+=`<div class="slot"><b>${esc(a.type||"(activity)")}</b><span class="cm">${pad(a.start.H)}:${pad(a.start.M)}-${pad(a.end.H)}:${pad(a.end.M)}</span>${loc?`<div>${loc}</div>`:""}${gname?`<span class="grp">${esc(gname)}</span>`:""}${a.courses?`<div class="cm">${esc(a.courses)}</div>`:""}${a.comment?`<div class="cm">${esc(a.comment)}</div>`:""}</div>`;
       }
       row+=`<td>${cells}</td>`;
     }
     rows+=row+"</tr>";
   }
   box.innerHTML=head+rows+"</tbody></table>";
-  const grp=state.pairs.some(p=>p.g&&p.g.id);
+  const grp=state.pairs.some(p=>p.g&&p.g.id)||state.programmes.some(p=>p.g&&p.g.id);
   label.textContent=`Week of ${fmtShort(monday)}${grp?" (your groups only)":""}`;
 }
 
@@ -632,6 +729,9 @@ def application(environ, start_response):
                 return _json_response(start_response, {"items": items})
             if path == "/api/course-groups":
                 groups = course_groups(payload.get("courseCodes", []))
+                return _json_response(start_response, {"groups": groups})
+            if path == "/api/programme-groups":
+                groups = programme_groups(payload.get("programmeIds", []))
                 return _json_response(start_response, {"groups": groups})
             if path == "/api/generate":
                 programme_ids = list(payload.get("programmeIds", []))
