@@ -82,7 +82,7 @@ def search(kind, term, limit=50):
 def generate_schedule(object_ids, course_codes):
     data = rug_post(
         f"/maat/api/{ACADEMIC_YEAR}/schedule/generate",
-        {"objects": object_ids, "courseOfferingCodes": course_codes},
+        {"objects": object_ids, "courseOfferings": [{"code": c} for c in course_codes]},
     )
     activities = []
     for r in data.get("results", []):
